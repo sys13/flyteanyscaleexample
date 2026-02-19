@@ -1,0 +1,16 @@
+[project]
+name = "arrizzascratchpad"
+version = "0.1.0"
+description = "Flyte and Anyscale integration POC"
+requires-python = ">=3.12"
+dependencies = [
+    "flytekit",
+    "anyscale",
+    "ray",
+]
+
+[dependency-groups]
+dev = []
+
+[tool.uv]
+managed = true
