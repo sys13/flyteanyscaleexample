@@ -7,11 +7,14 @@ from flytekit.extend.backend.base_agent import AsyncAgentBase, AgentRegistry, Re
 from flytekit.core.base_task import PythonTask
 from flytekit.core.type_engine import TypeEngine
 from flyteidl.core.execution_pb2 import TaskExecution
+from flyteidl.core.execution_pb2 import TaskLog
 import anyscale
 from anyscale.job.models import JobConfig
 import os
 import json
 from pathlib import Path
+
+from compute_config import build_compute_config
 
 cloud_name = "aws-public-us-west-2"
 project_name = "flytetest"
@@ -55,6 +58,9 @@ class AnyscaleAgent(AsyncAgentBase):
         working_dir = os.path.dirname(abs_script_path)
         entrypoint = f"python {os.path.basename(abs_script_path)}"
 
+        # Translate the Flyte node spec to an Anyscale compute config (if present)
+        compute_config = build_compute_config(task_template)
+
         config = JobConfig(
             name="flyte-agent-job",
             entrypoint=entrypoint,
@@ -62,6 +68,7 @@ class AnyscaleAgent(AsyncAgentBase):
             image_uri="anyscale/ray:2.54.0-slim-py313-cu129",
             cloud=cloud_name,
             project=project_name,
+            **({"compute_config": compute_config} if compute_config else {}),
         )
 
         # Submit the job asynchronously
@@ -70,24 +77,29 @@ class AnyscaleAgent(AsyncAgentBase):
         return AnyscaleJobMetadata(job_id=job_id)
 
     def get(self, resource_meta: AnyscaleJobMetadata, **kwargs) -> Resource:
-        # Get current job status
+        from anyscale.job.models import JobState
+
         status = anyscale.job.status(id=resource_meta.job_id)
         print(f"Anyscale job {resource_meta.job_id} status: {status.state}")
 
-        # Map Anyscale states to Flyte execution phases
-        # Common Anyscale states: PENDING, RUNNING, SUCCEEDED, FAILED, STOPPED
-        phase = TaskExecution.RUNNING
-        if status.state == "SUCCEEDED":
-            phase = TaskExecution.SUCCEEDED
-        elif status.state in ["FAILED", "STOPPED"]:
-            phase = TaskExecution.FAILED
-        
-        return Resource(phase=phase, outputs={"job_id": resource_meta.job_id})
+        phase_map = {
+            JobState.STARTING: TaskExecution.INITIALIZING,
+            JobState.RUNNING: TaskExecution.RUNNING,
+            JobState.SUCCEEDED: TaskExecution.SUCCEEDED,
+            JobState.FAILED: TaskExecution.FAILED,
+            JobState.UNKNOWN: TaskExecution.UNDEFINED,
+        }
+        phase = phase_map.get(status.state, TaskExecution.UNDEFINED)
+
+        log_links = [TaskLog(
+            uri=f"https://console.anyscale.com/jobs/{resource_meta.job_id}",
+            name="Anyscale Job Console",
+        )]
+        return Resource(phase=phase, outputs={"job_id": resource_meta.job_id}, log_links=log_links)
 
     def delete(self, resource_meta: AnyscaleJobMetadata, **kwargs):
-        # Cancel the job on Anyscale
         print(f"Cancelling Anyscale job: {resource_meta.job_id}")
-        anyscale.job.stop(id=resource_meta.job_id)
+        anyscale.job.terminate(id=resource_meta.job_id)
 
 # Register the agent
 AgentRegistry.register(AnyscaleAgent())
